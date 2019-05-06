@@ -598,10 +598,14 @@ func (q *qemu) startSandbox(timeout int) error {
 		// connection with QEMU closes.  Therefore we do not keep track
 		// of this child process after returning from this function.
 		sourcePath := filepath.Join(kataHostSharedDir, q.id)
-		cmd := exec.Command(q.config.VirtioFSDaemon,
-			"-o", "vhost_user_socket="+sockPath,
-			"-o", "source="+sourcePath,
-			"-o", "cache="+q.config.VirtioFSCache)
+		args := []string{
+			"-o", "vhost_user_socket=" + sockPath,
+			"-o", "source=" + sourcePath,
+			"-o", "cache=" + q.config.VirtioFSCache}
+		if q.config.Debug {
+			args = append(args, "-d")
+		}
+		cmd := exec.Command(q.config.VirtioFSDaemon, args...)
 		stderr, err := cmd.StderrPipe()
 		if err != nil {
 			return err
@@ -621,16 +625,27 @@ func (q *qemu) startSandbox(timeout int) error {
 		timeStart := time.Now()
 		go func() {
 			scanner := bufio.NewScanner(stderr)
+			var sent bool
 			for scanner.Scan() {
-				if strings.Contains(scanner.Text(), "Waiting for QEMU socket connection...") {
+				if q.config.Debug {
+					q.Logger().WithField("source", "virtiofsd").Debug(scanner.Text())
+				}
+				if !sent && strings.Contains(scanner.Text(), "Waiting for QEMU socket connection...") {
 					sockReady <- nil
-					return
+					sent = true
+					if !q.config.Debug {
+						return
+					}
 				}
 			}
-			if err := scanner.Err(); err != nil {
-				sockReady <- err
+			if !sent {
+				if err := scanner.Err(); err != nil {
+					sockReady <- err
+				} else {
+					sockReady <- fmt.Errorf("virtiofsd did not announce socket connection")
+				}
 			}
-			sockReady <- fmt.Errorf("virtiofsd did not announce socket connection")
+			q.Logger().Info("virtiofsd quits")
 		}()
 		timeoutDuration := time.Duration(timeout) * time.Second
 		select {
